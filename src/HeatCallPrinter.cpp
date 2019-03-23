@@ -43,7 +43,7 @@
 #include <set>
 
 using namespace llvm;
-
+using ProfileCount = Function::ProfileCount;
 
 static cl::opt<bool>
 EstimateEdgeWeight("heat-callgraph-estimate-weight", cl::init(false),
@@ -83,9 +83,9 @@ public:
          continue;
        uint64_t localMaxFreq = 0;
        if (UseCallCounter) {
-         Optional< uint64_t > freq = F.getEntryCount();
+         ProfileCount freq = F.getEntryCount();
          if (freq.hasValue())
-           localMaxFreq = freq.getValue();       
+           localMaxFreq = freq.getCount();      
        } else {
           localMaxFreq = llvm::getMaxFreq(F,LookupBFI(F),useHeuristic);
        }
