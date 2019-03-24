@@ -58,13 +58,15 @@ namespace llvm{
 class HeatCFGInfo {
 private:
    BlockFrequencyInfo *BFI;
+   BranchProbabilityInfo *BPI;
    Function *F;
    uint64_t maxFreq;
    bool useHeuristic;
 public:
-   HeatCFGInfo(Function *F, BlockFrequencyInfo *BFI, uint64_t maxFreq,
+   HeatCFGInfo(Function *F, BlockFrequencyInfo *BFI, BranchProbabilityInfo *BPI, uint64_t maxFreq,
                bool useHeuristic){
       this->BFI = BFI;
+      this->BPI = BPI;
       this->F = F;
       this->maxFreq = maxFreq;
       this->useHeuristic = useHeuristic;
@@ -72,12 +74,21 @@ public:
 
    BlockFrequencyInfo *getBFI(){ return BFI; }
 
+   BranchProbabilityInfo *getBPI(){ return BPI; }
+
    Function *getF(){ return this->F; }
 
    uint64_t getMaxFreq() { return maxFreq; }
 
    uint64_t getFreq(const BasicBlock *BB){
       return getBlockFreq(BB,BFI,useHeuristic);
+   }
+
+   double getBranchProb(const BasicBlock *BB, succ_const_iterator I){
+       auto prob = BPI->getEdgeProbability(BB, I);
+       uint32_t N = prob.getNumerator();
+       uint32_t D = prob.getDenominator();
+      return rint(((double)N / D) * 100.0 * 100.0) / 100.0;
    }
 };
 
@@ -231,7 +242,7 @@ struct DOTGraphTraits<HeatCFGInfo *> : public DefaultDOTGraphTraits {
        // profile count (due to scaling).
        Attrs = "label=\"W:" + std::to_string(Weight->getZExtValue()) + "\"";
     } else {
-       uint64_t total = 0;
+       /*uint64_t total = 0;
        for (unsigned i = 0; i<TI->getNumSuccessors(); i++){
           total += Graph->getFreq(TI->getSuccessor(i));
        }
@@ -247,8 +258,9 @@ struct DOTGraphTraits<HeatCFGInfo *> : public DefaultDOTGraphTraits {
        if (Graph->getFreq(SuccBB)>0) {
          double freq = Graph->getFreq(SuccBB);
          val = (int(round((freq/double(total))*10000)))/100.0;
-       }
-
+       }*/
+       
+       double val = Graph->getBranchProb(Node, I);
        std::stringstream ss;
        ss.precision(2);
        ss << std::fixed << val;
@@ -272,7 +284,7 @@ struct DOTGraphTraits<HeatCFGInfo *> : public DefaultDOTGraphTraits {
 
 }
 
-static void writeHeatCFGToDotFile(Function &F, BlockFrequencyInfo *BFI,
+static void writeHeatCFGToDotFile(Function &F, BlockFrequencyInfo *BFI, BranchProbabilityInfo *BPI,
                            uint64_t maxFreq, bool useHeuristic, bool isSimple) {
   std::string Filename = ("heatcfg." + F.getName() + ".dot").str();
   errs() << "Writing '" << Filename << "'...";
@@ -280,7 +292,7 @@ static void writeHeatCFGToDotFile(Function &F, BlockFrequencyInfo *BFI,
   std::error_code EC;
   raw_fd_ostream File(Filename, EC, sys::fs::F_Text);
 
-  HeatCFGInfo heatCFGInfo(&F,BFI,maxFreq,useHeuristic);
+  HeatCFGInfo heatCFGInfo(&F,BFI,BPI,maxFreq,useHeuristic);
 
   if (!EC)
      WriteGraph(File, &heatCFGInfo, isSimple);
@@ -290,7 +302,8 @@ static void writeHeatCFGToDotFile(Function &F, BlockFrequencyInfo *BFI,
 }
 
 static void writeHeatCFGToDotFile(Module &M,
-       function_ref<BlockFrequencyInfo *(Function &)> LookupBFI, bool isSimple){
+       function_ref<BlockFrequencyInfo *(Function &)> LookupBFI, 
+       function_ref<BranchProbabilityInfo *(Function &)> LookupBPI, bool isSimple){
   uint64_t maxFreq = 0;
 
   bool useHeuristic = !hasProfiling(M);
@@ -303,7 +316,7 @@ static void writeHeatCFGToDotFile(Module &M,
       continue;
     if (HeatCFGPerFunction)
        maxFreq = getMaxFreq(F,LookupBFI(F),useHeuristic);
-    writeHeatCFGToDotFile(F,LookupBFI(F),maxFreq,useHeuristic,isSimple);
+    writeHeatCFGToDotFile(F,LookupBFI(F),LookupBPI(F),maxFreq,useHeuristic,isSimple);
   }
 }
 
@@ -312,6 +325,7 @@ namespace {
 void HeatCFGPrinterPass::getAnalysisUsage(AnalysisUsage &AU) const {
   ModulePass::getAnalysisUsage(AU);
   AU.addRequired<BlockFrequencyInfoWrapperPass>();
+  AU.addRequired<BranchProbabilityInfoWrapperPass>();
   AU.setPreservesAll();
 }
 
@@ -319,13 +333,19 @@ bool HeatCFGPrinterPass::runOnModule(Module &M) {
   auto LookupBFI = [this](Function &F) {
     return &this->getAnalysis<BlockFrequencyInfoWrapperPass>(F).getBFI();
   };
-  writeHeatCFGToDotFile(M,LookupBFI,false);
+
+  auto LookupBPI = [this](Function &F) {
+    return &this->getAnalysis<BranchProbabilityInfoWrapperPass>(F).getBPI();
+  };
+
+  writeHeatCFGToDotFile(M,LookupBFI,LookupBPI,false);
   return false;
 }
 
 void HeatCFGOnlyPrinterPass::getAnalysisUsage(AnalysisUsage &AU) const {
   ModulePass::getAnalysisUsage(AU);
   AU.addRequired<BlockFrequencyInfoWrapperPass>();
+  AU.addRequired<BranchProbabilityInfoWrapperPass>();
   AU.setPreservesAll();
 }
 
@@ -333,7 +353,12 @@ bool HeatCFGOnlyPrinterPass::runOnModule(Module &M) {
   auto LookupBFI = [this](Function &F) {
     return &this->getAnalysis<BlockFrequencyInfoWrapperPass>(F).getBFI();
   };
-  writeHeatCFGToDotFile(M,LookupBFI,true);
+
+  auto LookupBPI = [this](Function &F) {
+    return &this->getAnalysis<BranchProbabilityInfoWrapperPass>(F).getBPI();
+  };
+
+  writeHeatCFGToDotFile(M,LookupBFI,LookupBPI,true);
   return false;
 }
 
